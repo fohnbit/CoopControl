@@ -1,0 +1,14 @@
+treshold:
+  indoor_dawn: 56
+  indoor_dawn_hysteresis: 30
+  indoor_food: 56
+  indoor_food_hysteresis: 30
+  
+times:
+  max_motor_on_time: 45
+  sensor_read_interval: 60
+  max_manual_mode_time: 3600
+  after_sunset_delay: 60
+  after_sunrise_delay: 360
+  second_chance_delay: 600
+  dimming_time: 600

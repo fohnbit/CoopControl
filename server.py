@@ -1,9 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import logging
 import requests
 from socket import *
-from threading import Thread
-import thread
+from threading import Thread 
+import _thread
 import pytz
 import time
 import sys
@@ -11,7 +14,11 @@ import Adafruit_DHT
 import glob
 import datetime
 import RPi.GPIO as GPIO
-from astral import Astral
+from pushover import Pushover
+import json
+import yaml
+import smbus
+# from astral import Astral
 
 # Hold either button for 2 seconds to switch modes
 # In auto buttons Stop for 60 seconds. Again, continues
@@ -39,75 +46,111 @@ logger.addHandler(ch)
 
 
 class Coop(object):
-    MAX_MANUAL_MODE_TIME = 60 * 60
-    MAX_MOTOR_ON = 45
-    TEMP_INTERVAL = 60 * 5
-    TIMEZONE_CITY = 'Boston'
-    AFTER_SUNSET_DELAY = 60
-    AFTER_SUNRISE_DELAY = 3 * 60
-    SECOND_CHANCE_DELAY = 60 * 10
+    file = open('config.yml', 'r')
+    CFG = yaml.load(file, Loader=yaml.FullLoader)
+    
+    file = open('userSettings.yml', 'r')
+    USR = yaml.load(file, Loader=yaml.FullLoader)
+
+    MAX_MANUAL_MODE_TIME = USR.get("times").get("max_manual_mode_time")
+    MAX_MOTOR_ON = USR.get("times").get("max_motor_on_time")
+    SENSOR_INTERVAL = USR.get("times").get("sensor_read_interval")
+    # TIMEZONE_CITY = 'Boston'
+    AFTER_SUNSET_DELAY = USR.get("times").get("after_sunset_delay")
+    AFTER_SUNRISE_DELAY = USR.get("times").get("after_sunrise_delay")
+    SECOND_CHANCE_DELAY = USR.get("times").get("second_chance_delay")
+    
+    
+    
     IDLE = UNKNOWN = NOT_TRIGGERED = AUTO = 0
     UP = OPEN = TRIGGERED = MANUAL = 1
     DOWN = CLOSED = HALT = 2
 
-    PIN_LED = 5
-    PIN_BUTTON_UP = 13
-    PIN_BUTTON_DOWN = 19
-    PIN_SENSOR_TOP = 20
-    PIN_SENSOR_BOTTOM = 21
-    PIN_MOTOR_ENABLE = 18
-    PIN_MOTOR_A = 12
-    PIN_MOTOR_B = 16
+    PIN_LED = CFG.get("pins").get("led")
+    PIN_BUTTON_UP = CFG.get("pins").get("button_up")
+    PIN_BUTTON_DOWN = CFG.get("pins").get("button_down")
+    PIN_SENSOR_TOP = CFG.get("pins").get("sensor_top")
+    PIN_SENSOR_BOTTOM = CFG.get("pins").get("sensor_bottom")
+    PIN_MOTOR_ENABLE = CFG.get("pins").get("motor_enable")
+    PIN_MOTOR_A = CFG.get("pins").get("motor_a")
+    PIN_MOTOR_B = CFG.get("pins").get("motor_b")
 
+    ONE_WIRE_WATER = '/sys/bus/w1/devices/' + CFG.get("one_wire").get("water") + '/w1_slave'
+    ONE_WIRE_WATER2 = '/sys/bus/w1/devices/' + CFG.get("one_wire").get("water2") + '/w1_slave'
     PIN_TEMP_WATER = 4 # Can't change
     PIN_TEMP1 = 22
     PIN_TEMP2 = 6
+    
+    file = open('auth.yml', 'r')
+    AUTH = yaml.load(file, Loader=yaml.FullLoader)
+    
+    PUSHOVER_TOKEN = AUTH.get("auth").get("api-key")
+    PUSHOVER_USER = AUTH.get("auth").get("user-key")  
+    
 
     def __init__(self):
+        
+        self.indoor_dawn_treshold = Coop.USR.get("treshold").get("indoor_dawn")
+        self.indoor_dawn_hysteresis = Coop.USR.get("treshold").get("indoor_dawn_hysteresis")
+        self.indoor_food_treshold = Coop.USR.get("treshold").get("indoor_food")
+        self.indoor_food_hysteresis = Coop.USR.get("treshold").get("indoor_food_hysteresis")
+        self.indoor_dimming_time = Coop.USR.get("times").get("dimming_time")
+
         self.door_status = Coop.UNKNOWN
         self.started_motor = None 
         self.direction = Coop.IDLE
         self.door_mode = Coop.AUTO
         self.manual_mode_start = 0
         self.temp_water = 0
-        self.temp1 = 0
-        self.temp2 = 0
-        self.humidity1 = 0
-        self.humidity2 = 0
         self.second_chance = True
+        self.indoor_temp = 0
+        self.outdoor_temp = 0
+        self.indoor_humidity = 0
+        self.outdoor_humidity = 0        
+        self.indoor_illumination = 0
+        self.outdoor_illumination = 0
+        self.food_illumination = 0
+        self.indoor_light_1 = 0
+        self.indoor_light_2 = 0
+        self.indoor_light_3 = 0
+        self.indoor_light_4 = 0
+        self.indoor_light_5 = 0
+        self.indoor_light_6 = 0
         self.cache = {}
 
-        self.mail_key = os.environ.get('MAILGUN_KEY') or exit('You need a key set')
-        self.mail_url = os.environ.get('MAILGUN_URL') or exit('You need a key set')
-        self.mail_recipient = os.environ.get('MAILGUN_RECIPIENT') or exit('You need a key set')
 
-        try:
-            base_dir = '/sys/bus/w1/devices/'
-            device_folder = glob.glob(base_dir + '28*')[0]
-            self.device_file = device_folder + '/w1_slave'
-        except:
-            self.device_file = None
-            pass
+        #self.mail_key = os.environ.get('MAILGUN_KEY') or exit('You need a key set')
+        #self.mail_url = os.environ.get('MAILGUN_URL') or exit('You need a url set')
+        #self.mail_recipient = os.environ.get('MAILGUN_RECIPIENT') or exit('You need a recipient set')
 
-        a = Astral()
-        self.city = a[Coop.TIMEZONE_CITY]
+        #try:
+        #    base_dir = '/sys/bus/w1/devices/'
+        #    device_folder = glob.glob(base_dir + '28*')[0]
+        #    self.device_file = device_folder + '/w1_slave'
+        #except:
+        #    self.device_file = None
+        #    pass
+
+        #a = Astral()
+        #self.city = a[Coop.TIMEZONE_CITY]
         self.setupPins()
 
         t1 = Thread(target = self.checkTriggers)
-        t2 = Thread(target = self.checkTime)
+        #t2 = Thread(target = self.checkSensors)
         t3 = Thread(target = self.readTemps)
         t1.setDaemon(True)
-        t2.setDaemon(True)
+        #t2.setDaemon(True)
         t3.setDaemon(True)
         t1.start()
-        t2.start()
+        #t2.start()
         t3.start()
 
-        host = 'localhost'
+        host = '192.168.0.63'
         port = 55567
         addr = (host, port)
 
         serversocket = socket(AF_INET, SOCK_STREAM)
+        serversocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         serversocket.bind(addr)
         serversocket.listen(2)
 
@@ -121,7 +164,7 @@ class Coop(object):
             try:
                 logger.info("Server is listening for connections\n")
                 clientsocket, clientaddr = serversocket.accept()
-                thread.start_new_thread(self.handler, (clientsocket, clientaddr))
+                _thread.start_new_thread(self.handler, (clientsocket, clientaddr))
             except KeyboardInterrupt:
                 break
             time.sleep(0.01)
@@ -138,13 +181,16 @@ class Coop(object):
         GPIO.setup(Coop.PIN_MOTOR_A, GPIO.OUT)
         GPIO.setup(Coop.PIN_MOTOR_B, GPIO.OUT)
         GPIO.setup(Coop.PIN_LED, GPIO.OUT)
-        GPIO.setup(Coop.PIN_SENSOR_BOTTOM, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-        GPIO.setup(Coop.PIN_SENSOR_TOP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        GPIO.setup(Coop.PIN_SENSOR_BOTTOM, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(Coop.PIN_SENSOR_TOP, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(Coop.PIN_BUTTON_UP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(Coop.PIN_BUTTON_DOWN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        
+        # self.emergencyStopDoor('Startup Sequenz')
 
     def closeDoor(self):
         (top, bottom) = self.currentTriggerStatus()
+        print (top, bottom)
         if (bottom == Coop.TRIGGERED):
             logger.info("Door is already closed")
             return
@@ -163,6 +209,7 @@ class Coop(object):
         logger.info("Opening door")
         self.started_motor = datetime.datetime.now()
         GPIO.output(Coop.PIN_MOTOR_ENABLE, GPIO.HIGH)
+        print(Coop.PIN_MOTOR_A)
         GPIO.output(Coop.PIN_MOTOR_A, GPIO.HIGH)
         GPIO.output(Coop.PIN_MOTOR_B, GPIO.LOW)
         self.direction= Coop.UP
@@ -181,21 +228,21 @@ class Coop(object):
         if (top == Coop.TRIGGERED):
             logger.info("Door is open")
             self.door_status = Coop.OPEN
-            self.sendEmail('Coop door is OPEN', 'Yay!')
+            self.pushOver('Coop door is OPEN')
         elif (bottom == Coop.TRIGGERED):
             logger.info("Door is closed")
             self.door_status = Coop.CLOSED
-            self.sendEmail('Coop door is CLOSED', 'Yay!')
+            self.pushOver('Coop door is CLOSED')
         else:
             logger.info("Door is in an unknown state")
             self.door_status = Coop.UNKNOWN
 
-            payload = {'status': self.door_status, 'ts': datetime.datetime.now() }
-            self.postData('door', payload)
+            # payload = {'status': self.door_status, 'ts': datetime.datetime.now() }
+            # self.postData('door', payload)
 
     def emergencyStopDoor(self, reason):
         ## Just shut it off no matter what
-        logger.info("Emergency Stop door: " + reason)
+        logger.info("Emergency Stop door: " + str(reason))
         GPIO.output(Coop.PIN_MOTOR_ENABLE, GPIO.LOW)
         GPIO.output(Coop.PIN_MOTOR_A, GPIO.LOW)
         GPIO.output(Coop.PIN_MOTOR_B, GPIO.LOW)
@@ -203,21 +250,21 @@ class Coop(object):
         self.started_motor = None
         self.changeDoorMode(Coop.HALT)
         self.stopDoor(0)
-        self.sendEmail('Coop Emergency STOP', reason)
+        self.pushOver('Coop Emergency STOP: ' + str(reason))
 
-    def sendEmail(self, subject, content):
-        logger.info("Sending email: %s" % subject)
-        try:
-            request = requests.post(
-                self.mail_url,
-                auth=("api", self.mail_key),
-                data={"from": "Chickens <mailgun@mailgun.dxxd.net>",
-                      "to": [self.mail_recipient],
-                      "subject": subject,
-                      "text": content}) 
-            #logger.info('Status: {0}'.format(request.status_code))
-        except Exception as e:
-            logger.error("Error: " + e)
+    #def sendEmail(self, subject, content):
+    #    logger.info("Sending email: %s" % subject)
+    #    try:
+    #        request = requests.post(
+    #            self.mail_url,
+    #            auth=("api", self.mail_key),
+    #            data={"from": "Chickens <mailgun@mailgun.dxxd.net>",
+    #                  "to": [self.mail_recipient],
+    #                  "subject": subject,
+    #                  "text": content}) 
+    #        #logger.info('Status: {0}'.format(request.status_code))
+    #    except Exception as e:
+    #        logger.error("Error: " + e)
 
     def postData(self, endpoint, payload):
         try:
@@ -225,38 +272,39 @@ class Coop(object):
         except Exception as e:
             logger.error(e)
 
-    def checkTime(self):
-        while True:
-            if self.door_mode == Coop.AUTO:
-                current = datetime.datetime.now(pytz.timezone(self.city.timezone))
-                sun = self.city.sun(date=datetime.datetime.now(), local=True)
+    #def checkTime(self):
+        #while True:
+            #if self.door_mode == Coop.AUTO:
+                #current = datetime.datetime.now(pytz.timezone(self.city.timezone))
+                #sun = self.city.sun(date=datetime.datetime.now(), local=True)
 
-                after_sunset = sun["sunset"] + datetime.timedelta(minutes = Coop.AFTER_SUNSET_DELAY)
-                after_sunrise = sun["sunrise"] + datetime.timedelta(minutes = Coop.AFTER_SUNRISE_DELAY) 
+                #after_sunset = sun["sunset"] + datetime.timedelta(minutes = Coop.AFTER_SUNSET_DELAY)
+                #after_sunrise = sun["sunrise"] + datetime.timedelta(minutes = Coop.AFTER_SUNRISE_DELAY) 
 
-                if (current < after_sunrise or current > after_sunset) and self.door_status != Coop.CLOSED and self.direction != Coop.DOWN:
-                    logger.info("Door should be closed based on time of day")
-                    self.closeDoor()
+                #if (current < after_sunrise or current > after_sunset) and self.door_status != Coop.CLOSED and self.direction != Coop.DOWN:
+                #    logger.info("Door should be closed based on time of day")
+                #    self.closeDoor()
 
-                    if self.second_chance:
-                        t2 = Thread(target = self.secondChance)
-                        t2.setDaemon(True)
-                        t2.start()
-                elif current > after_sunrise and current < after_sunset and self.door_status != Coop.OPEN and self.direction != Coop.UP:
-                    logger.info("Door should be open based on time of day")
-                    self.openDoor()
-            time.sleep(1)
+                #    if self.second_chance:
+                #        t2 = Thread(target = self.secondChance)
+                #        t2.setDaemon(True)
+                #        t2.start()
+                #elif current > after_sunrise and current < after_sunset and self.door_status != Coop.OPEN and self.direction != Coop.UP:
+                #    logger.info("Door should be open based on time of day")
+                #    self.openDoor()
+           # time.sleep(1)
 
-    def readTempRaw(self):
-        f = open(self.device_file, 'r')
+    def readTempRaw(self, file):
+        f = open(file, 'r')
         lines = f.readlines()
         f.close()
         return lines
 
     def waterTemp(self):
-        if self.device_file is None:
+        if Coop.ONE_WIRE_WATER is None:
             return
-        lines = self.readTempRaw()
+        lines = self.readTempRaw(Coop.ONE_WIRE_WATER)
+
         while lines[0].strip()[-3:] != 'YES':
             time.sleep(0.2)
             lines = self.readTempRaw()
@@ -264,13 +312,12 @@ class Coop(object):
         if equals_pos != -1:
             temp_string = lines[1][equals_pos+2:]
             temp_c = float(temp_string) / 1000.0
-            temp_f = temp_c * 9.0 / 5.0 + 32.0
-            self.temp_water = temp_f
-            logger.info("Water temp: %f" % temp_f)
+            self.temp_water = temp_c
+            logger.info("Water temp: %f" % temp_c)
 
 
-            payload = {'name': 'water', 'temperature': temp_f, 'humidity': 0, 'ts': datetime.datetime.now() }
-            self.postData('temperature', payload)
+            # payload = {'name': 'water', 'temperature': temp_c, 'humidity': 0, 'ts': datetime.datetime.now() }
+            # self.postData('temperature', payload)
 
     def tempForPin(self, pin):
         retries = 3
@@ -292,30 +339,68 @@ class Coop(object):
         return (0, 0)
 
     def otherTemps(self):
-        (self.temp1, self.humidity1) = self.tempForPin(Coop.PIN_TEMP1)
-        (self.temp2, self.humidity2) = self.tempForPin(Coop.PIN_TEMP2)
-        
-        ts = datetime.datetime.now()
-        payload = {'name': 'temp1', 'temperature': self.temp1, 'humidity': self.humidity1, 'ts': ts}
-        self.postData('temperature', payload)
+        if Coop.ONE_WIRE_WATER2 is None:
+            return
+        lines = self.readTempRaw(Coop.ONE_WIRE_WATER2)
 
-        payload = {'name': 'temp2', 'temperature': self.temp2, 'humidity': self.humidity2, 'ts': ts }
-        self.postData('temperature', payload)
+        while lines[0].strip()[-3:] != 'YES':
+            time.sleep(0.2)
+            lines = self.readTempRaw()
+        equals_pos = lines[1].find('t=')
+        if equals_pos != -1:
+            temp_string = lines[1][equals_pos+2:]
+            temp_c = float(temp_string) / 1000.0
+            self.temp_water = temp_c
+            logger.info("Water2 temp: %f" % temp_c)
+            
+        #(self.temp1, self.humidity1) = self.tempForPin(Coop.PIN_TEMP1)
+        #(self.temp2, self.humidity2) = self.tempForPin(Coop.PIN_TEMP2)
+        
+        #ts = datetime.datetime.now()
+        # payload = {'name': 'temp1', 'temperature': self.temp1, 'humidity': self.humidity1, 'ts': ts}
+        # self.postData('temperature', payload)
+
+        # payload = {'name': 'temp2', 'temperature': self.temp2, 'humidity': self.humidity2, 'ts': ts }
+        # self.postData('temperature', payload)
+
+    def illumination(self):
+        address = 0x48
+        A0 = 0x40
+        A1 = 0x41
+        A2 = 0xA2
+        A3 = 0xA3
+        bus = smbus.SMBus(1)
+
+        bus.write_byte(address,A0)	
+        bus.read_byte(address)
+        self.outdoor_illumination = bus.read_byte(address)
+        logger.info("Outdoor Illumination: %f" % self.outdoor_illumination)
+        bus.write_byte(address,A1)	
+        bus.read_byte(address)
+        self.indoor_illumination = bus.read_byte(address)
+        logger.info("Indoor Illumination: %f" % self.indoor_illumination)
+        bus.write_byte(address,A2)	
+        bus.read_byte(address)
+        self.food_illumination = bus.read_byte(address)  
+        logger.info("Food Illumination: %f" % self.food_illumination)        
+
 
     def readTemps(self):
         while True:
+            self.illumination()
             self.waterTemp()
             self.otherTemps()
-            time.sleep(Coop.TEMP_INTERVAL)
+            time.sleep(Coop.SENSOR_INTERVAL)
 
     def currentTriggerStatus(self):
-        bottom = GPIO.input(Coop.PIN_SENSOR_BOTTOM)
-        top = GPIO.input(Coop.PIN_SENSOR_TOP)
+        bottom = not GPIO.input(Coop.PIN_SENSOR_BOTTOM)
+        top = not GPIO.input(Coop.PIN_SENSOR_TOP)
         return (top, bottom)
 
     def checkTriggers(self):
         while True:
             (top, bottom) = self.currentTriggerStatus()
+            # print(top, bottom)
             if (self.direction == Coop.UP and top == Coop.TRIGGERED):
                 logger.info("Top sensor triggered")
                 self.stopDoor(0)
@@ -400,7 +485,7 @@ class Coop(object):
         #logger.info("Accepted connection from: %s " % clientaddr)
 
         while True:
-            data = clientsocket.recv(1024)
+            data = clientsocket.recv(1024).decode()
             if not data:
                 break
             else:
@@ -409,6 +494,7 @@ class Coop(object):
                     self.changeDoorMode(Coop.MANUAL)
                     self.stopDoor(0)
                 elif (data == 'open'):
+                    print ('open now')
                     self.changeDoorMode(Coop.MANUAL)
                     self.openDoor()
                 elif (data == 'close'):
@@ -420,10 +506,55 @@ class Coop(object):
                     self.changeDoorMode(Coop.AUTO)
                 elif (data == 'halt'):
                     self.changeDoorMode(Coop.HALT)
+                elif (data == 'status_request'):
+                    clientsocket.sendall(str.encode(self.createJson()))
+                elif (data == 'get_log'):
+                    f = open('/tmp/log.log', 'r')
+                    clientsocket.sendall(str.encode(f.read()))
+                    f.close()
+                    
                 #msg = "You sent me: %s" % data
                 #clientsocket.send(msg)
             time.sleep(0.01)
         clientsocket.close()
-
+    
+    def pushOver(self, message):
+        try:
+            po = Pushover(Coop.PUSHOVER_TOKEN)
+            po.user(Coop.PUSHOVER_USER)
+            msg = po.msg(message)
+            msg.set("title", "Pips´s kleine Hühnerfarm")
+            # po.send(msg)
+        except Exception as e:
+            logger.error(e)
+            
+    def createJson(self):
+        data = {}
+        data['door_state'] = self.door_status
+        data['indoor_temp'] = self.indoor_temp
+        data['indoor_humidity'] = self.indoor_humidity
+        data['indoor_illumination'] = self.indoor_illumination
+        data['indoor_light_1'] = self.indoor_light_1
+        data['indoor_light_2'] = self.indoor_light_2
+        data['indoor_light_3'] = self.indoor_light_3
+        data['indoor_light_4'] = self.indoor_light_4
+        data['indoor_light_5'] = self.indoor_light_5
+        data['indoor_light_6'] = self.indoor_light_6
+        data['indoor_water_temp'] = self.temp_water
+        data['food_illumination'] = self.food_illumination
+        
+        data['outdoor_temp'] = self.outdoor_temp
+        data['outdoor_humidity'] = self.outdoor_humidity
+        data['outdoor_illumination'] = self.outdoor_illumination
+        data['indoor_dawn_treshold'] = self.indoor_dawn_treshold
+        data['indoor_dawn_hysteresis'] = self.indoor_dawn_hysteresis
+        
+        data['indoor_food_treshold'] = self.indoor_food_treshold
+        data['indoor_food_hysteresis'] = self.indoor_food_hysteresis
+        
+        json_data = json.dumps(data)
+        
+        return json_data
+     
 if __name__ == "__main__":
     coop = Coop()

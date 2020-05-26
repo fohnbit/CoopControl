@@ -1,0 +1,17 @@
+pins:
+  led: 26
+  button_up: 16
+  button_down: 6
+  sensor_top: 12
+  sensor_bottom: 21
+  motor_enable: 18
+  motor_a: 13
+  motor_b: 19
+
+one_wire:
+  water: 28-00000bef6732
+  water2: 28-00000befce45
+  
+logs:
+  path: /tmp/log.log
+
