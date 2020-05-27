@@ -18,6 +18,8 @@ from pushover import Pushover
 import json
 import yaml
 import smbus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 # from astral import Astral
 
 # Hold either button for 2 seconds to switch modes
@@ -45,7 +47,8 @@ logger.addHandler(fh)
 logger.addHandler(ch)
 
 
-class Coop(object):
+
+class Coop(BaseHTTPRequestHandler):
     file = open('config.yml', 'r')
     CFG = yaml.load(file, Loader=yaml.FullLoader)
     
@@ -86,7 +89,9 @@ class Coop(object):
     
     PUSHOVER_TOKEN = AUTH.get("auth").get("api-key")
     PUSHOVER_USER = AUTH.get("auth").get("user-key")  
-    
+
+    HOST_NAME = '192.168.0.63'
+    PORT_NUMBER = 9000
 
     def __init__(self):
         
@@ -94,6 +99,7 @@ class Coop(object):
         self.indoor_dawn_hysteresis = Coop.USR.get("treshold").get("indoor_dawn_hysteresis")
         self.indoor_food_treshold = Coop.USR.get("treshold").get("indoor_food")
         self.indoor_food_hysteresis = Coop.USR.get("treshold").get("indoor_food_hysteresis")
+        self.indoor_light_hours = Coop.USR.get("times").get("light_hours") # wie lange muss das Licht mind. brennen
         self.indoor_dimming_time = Coop.USR.get("times").get("dimming_time")
 
         self.door_status = Coop.UNKNOWN
@@ -159,7 +165,15 @@ class Coop(object):
 
         GPIO.add_event_detect(Coop.PIN_BUTTON_UP, GPIO.RISING, callback=self.buttonPress, bouncetime=200)
         GPIO.add_event_detect(Coop.PIN_BUTTON_DOWN, GPIO.RISING, callback=self.buttonPress, bouncetime=200)
-
+    
+    
+        # init Webserver
+        
+        server_class = HTTPServer
+        httpd = server_class((Coop.HOST_NAME, Coop.PORT_NUMBER), Coop)
+        print(time.asctime(), 'Server Starts - %s:%s' % (Coop.HOST_NAME, Coop.PORT_NUMBER))
+        httpd.serve_forever()
+    
         while True:
             try:
                 logger.info("Server is listening for connections\n")
@@ -170,6 +184,7 @@ class Coop(object):
             time.sleep(0.01)
 
         logger.info("Close connection")
+        httpd.server_close()
         GPIO.output(Coop.PIN_LED, GPIO.LOW)
         serversocket.close()
         self.stopDoor(0)
@@ -527,7 +542,8 @@ class Coop(object):
             # po.send(msg)
         except Exception as e:
             logger.error(e)
-            
+    
+       
     def createJson(self):
         data = {}
         data['door_state'] = self.door_status
@@ -546,15 +562,54 @@ class Coop(object):
         data['outdoor_temp'] = self.outdoor_temp
         data['outdoor_humidity'] = self.outdoor_humidity
         data['outdoor_illumination'] = self.outdoor_illumination
+        
         data['indoor_dawn_treshold'] = self.indoor_dawn_treshold
         data['indoor_dawn_hysteresis'] = self.indoor_dawn_hysteresis
         
         data['indoor_food_treshold'] = self.indoor_food_treshold
         data['indoor_food_hysteresis'] = self.indoor_food_hysteresis
         
+        
+        data['indoor_light_hours'] = self.indoor_light_hours
+        data['indoor_dimming_time'] = self.indoor_dimming_time
+        
         json_data = json.dumps(data)
         
         return json_data
-     
-if __name__ == "__main__":
+    
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+    def do_GET(self):
+        paths = {
+            '/foo': {'status': 200},
+            '/bar': {'status': 302},
+            '/baz': {'status': 404},
+            '/qux': {'status': 500}
+        }
+
+        if self.path in paths:
+            self.respond(paths[self.path])
+        else:
+            self.respond({'status': 500})
+
+    def handle_http(self, status_code, path):
+        self.send_response(status_code)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        content = '''
+        <html><head><title>Title goes here.</title></head>
+        <body><p>This is a test.</p>
+        <p>You accessed path: {}</p>
+        </body></html>
+        '''.format(path)
+        return bytes(content, 'UTF-8')
+
+    def respond(self, opts):
+        response = self.handle_http(opts['status'], self.path)
+        self.wfile.write(response)
+    
+if __name__ == "__main__":   
     coop = Coop()
